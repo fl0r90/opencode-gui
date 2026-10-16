@@ -95,26 +95,111 @@ function init() {
 
   const sdk = useSDK()
 
+  const defaultAgents: Agent[] = [
+    {
+      name: "auto-cluster",
+      description: "Autonomous Master ⇄ Worker Multi-Server Orchestrator",
+      mode: "primary",
+      builtIn: true,
+      permission: { edit: "allow", bash: {}, webfetch: "allow" },
+      tools: {},
+      options: {},
+    },
+    {
+      name: "build",
+      description: "Build & implementation agent",
+      mode: "primary",
+      builtIn: true,
+      permission: { edit: "allow", bash: {}, webfetch: "allow" },
+      tools: {},
+      options: {},
+    },
+    {
+      name: "plan",
+      description: "Architecture & planning agent",
+      mode: "primary",
+      builtIn: true,
+      permission: { edit: "allow", bash: {}, webfetch: "allow" },
+      tools: {},
+      options: {},
+    },
+  ]
+
   const load = {
-    provider: () => sdk.config.providers().then((x) => setStore("provider", x.data!.providers)),
-    path: () => sdk.path.get().then((x) => setStore("path", x.data!)),
-    agent: () => sdk.app.agents().then((x) => setStore("agent", x.data ?? [])),
+    provider: () =>
+      sdk.config
+        .providers()
+        .then((x) => {
+          if (x.data?.providers) {
+            setStore("provider", (prev) => [
+              ...prev.filter((p) => p.id.startsWith("lms-")),
+              ...x.data!.providers,
+            ])
+          }
+        })
+        .catch(() => {}),
+    path: () =>
+      sdk.path
+        .get()
+        .then((x) => {
+          if (x.data) setStore("path", x.data)
+        })
+        .catch(() => {}),
+    agent: () =>
+      sdk.app
+        .agents()
+        .then((x) => {
+          const remote = x.data ?? []
+          setStore("agent", remote.length ? [defaultAgents[0], ...remote] : defaultAgents)
+        })
+        .catch(() => {
+          setStore("agent", defaultAgents)
+        }),
     session: () =>
-      sdk.session.list().then((x) =>
-        setStore(
-          "session",
-          (x.data ?? []).slice().sort((a, b) => a.id.localeCompare(b.id)),
-        ),
-      ),
-    config: () => sdk.config.get().then((x) => setStore("config", x.data!)),
-    changes: () => sdk.file.status().then((x) => setStore("changes", x.data!)),
-    node: () => sdk.file.list({ query: { path: "/" } }).then((x) => setStore("node", x.data!)),
+      sdk.session
+        .list()
+        .then((x) =>
+          setStore(
+            "session",
+            (x.data ?? []).slice().sort((a, b) => a.id.localeCompare(b.id)),
+          ),
+        )
+        .catch(() => {}),
+    config: () =>
+      sdk.config
+        .get()
+        .then((x) => {
+          if (x.data) setStore("config", x.data)
+        })
+        .catch(() => {}),
+    changes: () =>
+      sdk.file
+        .status()
+        .then((x) => {
+          if (x.data) setStore("changes", x.data)
+        })
+        .catch(() => {}),
+    node: () =>
+      sdk.file
+        .list({ query: { path: "/" } })
+        .then((x) => {
+          if (x.data) setStore("node", x.data)
+        })
+        .catch(() => {}),
   }
 
-  Promise.all(Object.values(load).map((p) => p())).then(() => setStore("ready", true))
+  Promise.allSettled(Object.values(load).map((p) => p())).finally(() => {
+    if (store.agent.length === 0) {
+      setStore("agent", defaultAgents)
+    }
+    setStore("ready", true)
+  })
 
-  const sanitizer = createMemo(() => new RegExp(`${store.path.directory}/`, "g"))
-  const sanitize = (text: string) => text.replace(sanitizer(), "")
+  const sanitizer = createMemo(() => (store.path.directory ? new RegExp(`${store.path.directory}/`, "g") : undefined))
+  const sanitize = (text: string) => {
+    const reg = sanitizer()
+    return reg ? text.replace(reg, "") : text
+  }
 
   return {
     data: store,
@@ -123,26 +208,32 @@ function init() {
       get(sessionID: string) {
         const match = Binary.search(store.session, sessionID, (s) => s.id)
         if (match.found) return store.session[match.index]
-        return undefined
+        return store.session.find((s) => s.id === sessionID)
       },
       async sync(sessionID: string) {
-        const [session, messages] = await Promise.all([
-          sdk.session.get({ path: { id: sessionID } }),
-          sdk.session.messages({ path: { id: sessionID } }),
-        ])
-        setStore(
-          produce((draft) => {
-            const match = Binary.search(draft.session, sessionID, (s) => s.id)
-            draft.session[match.index] = session.data!
-            draft.message[sessionID] = messages
-              .data!.map((x) => x.info)
-              .slice()
-              .sort((a, b) => a.id.localeCompare(b.id))
-            for (const message of messages.data!) {
-              draft.part[message.info.id] = message.parts.slice().sort((a, b) => a.id.localeCompare(b.id))
-            }
-          }),
-        )
+        if (sessionID.startsWith("ses_lms_")) return
+        try {
+          const [session, messages] = await Promise.all([
+            sdk.session.get({ path: { id: sessionID } }),
+            sdk.session.messages({ path: { id: sessionID } }),
+          ])
+          if (!session.data || !messages.data) return
+          setStore(
+            produce((draft) => {
+              const match = Binary.search(draft.session, sessionID, (s) => s.id)
+              draft.session[match.index] = session.data!
+              draft.message[sessionID] = messages
+                .data!.map((x) => x.info)
+                .slice()
+                .sort((a, b) => a.id.localeCompare(b.id))
+              for (const message of messages.data!) {
+                draft.part[message.info.id] = message.parts.slice().sort((a, b) => a.id.localeCompare(b.id))
+              }
+            }),
+          )
+        } catch {
+          // Ignore sync errors when daemon is offline
+        }
       },
     },
     load,

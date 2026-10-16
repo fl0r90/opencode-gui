@@ -1,7 +1,7 @@
 import { createStore, produce, reconcile } from "solid-js/store"
 import { batch, createContext, createEffect, createMemo, useContext, type ParentProps } from "solid-js"
 import { uniqueBy } from "remeda"
-import type { FileContent, FileNode, Model, Provider, File as FileStatus } from "@opencode-ai/sdk"
+import type { Agent, FileContent, FileNode, Model, Provider, File as FileStatus } from "@opencode-ai/sdk"
 import { useSDK, useEvent, useSync } from "@/context"
 
 export type LocalFile = FileNode &
@@ -29,26 +29,40 @@ function init() {
   const sdk = useSDK()
   const sync = useSync()
 
+  const fallbackAgent: Agent = {
+    name: "auto-cluster",
+    description: "Autonomous Master ⇄ Worker Orchestrator",
+    mode: "primary",
+    builtIn: true,
+    permission: { edit: "allow", bash: {}, webfetch: "allow" },
+    tools: {},
+    options: {},
+  }
+
   const agent = (() => {
-    const list = createMemo(() => sync.data.agent.filter((x) => x.mode !== "subagent"))
+    const list = createMemo(() => {
+      const filtered = sync.data.agent.filter((x) => x.mode !== "subagent")
+      return filtered.length ? filtered : [fallbackAgent]
+    })
     const [store, setStore] = createStore<{
       current: string
     }>({
-      current: list()[0].name,
+      current: list()[0]?.name ?? "auto-cluster",
     })
     return {
       list,
       current() {
-        return list().find((x) => x.name === store.current)!
+        return list().find((x) => x.name === store.current) ?? list()[0] ?? fallbackAgent
       },
       set(name: string | undefined) {
-        setStore("current", name ?? list()[0].name)
+        setStore("current", name ?? list()[0]?.name ?? "auto-cluster")
       },
       move(direction: 1 | -1) {
         let next = list().findIndex((x) => x.name === store.current) + direction
         if (next < 0) next = list().length - 1
         if (next >= list().length) next = 0
         const value = list()[next]
+        if (!value) return
         setStore("current", value.name)
         if (value.model)
           model.set({
@@ -61,9 +75,10 @@ function init() {
 
   const model = (() => {
     const list = createMemo(() =>
-      sync.data.provider.flatMap((p) => Object.values(p.models).map((m) => ({ ...m, provider: p }) as LocalModel)),
+      sync.data.provider.flatMap((p) => Object.values(p.models ?? {}).map((m) => ({ ...m, provider: p }) as LocalModel)),
     )
-    const find = (key: ModelKey) => list().find((m) => m.id === key?.modelID && m.provider.id === key.providerID)
+    const find = (key: ModelKey | undefined) =>
+      key ? list().find((m) => m.id === key?.modelID && m.provider.id === key.providerID) : undefined
 
     const [store, setStore] = createStore<{
       model: Record<string, ModelKey>
@@ -79,16 +94,21 @@ function init() {
       localStorage.setItem("model", JSON.stringify(store.recent))
     })
 
-    const fallback = createMemo(() => {
-      if (store.recent.length) return store.recent[0]
+    const fallback = createMemo<ModelKey | undefined>(() => {
+      if (store.recent.length) {
+        const found = find(store.recent[0])
+        if (found) return store.recent[0]
+      }
       const provider = sync.data.provider[0]
-      const model = Object.values(provider.models)[0]
-      return { modelID: model.id, providerID: provider.id }
+      if (!provider) return undefined
+      const firstModel = Object.values(provider.models ?? {})[0]
+      if (!firstModel) return undefined
+      return { modelID: firstModel.id, providerID: provider.id }
     })
 
     const current = createMemo(() => {
       const a = agent.current()
-      return find(store.model[agent.current().name]) ?? find(a.model ?? fallback())
+      return find(store.model[a.name]) ?? find(a.model ?? fallback()) ?? list()[0]
     })
 
     const recent = createMemo(() => store.recent.map(find).filter(Boolean))
@@ -99,7 +119,10 @@ function init() {
       recent,
       set(model: ModelKey | undefined, options?: { recent?: boolean }) {
         batch(() => {
-          setStore("model", agent.current().name, model ?? fallback())
+          const target = model ?? fallback()
+          if (target) {
+            setStore("model", agent.current().name, target)
+          }
           if (options?.recent && model) {
             const uniq = uniqueBy([model, ...store.recent], (x) => x.providerID + x.modelID)
             if (uniq.length > 5) uniq.pop()

@@ -8,11 +8,16 @@ export type Event = SDKEvent // can extend with custom events later
 function init() {
   const sdk = useSDK()
   const bus = createEventBus<Event>()
-  sdk.event.subscribe().then(async (events) => {
-    for await (const event of events.stream) {
-      bus.emit(event)
-    }
-  })
+  sdk.event
+    .subscribe()
+    .then(async (events) => {
+      for await (const event of events.stream) {
+        bus.emit(event)
+      }
+    })
+    .catch(() => {
+      // OpenCode daemon offline; running in standalone LM Studio GUI mode
+    })
   return bus
 }
 

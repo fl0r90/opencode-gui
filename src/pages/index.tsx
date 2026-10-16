@@ -4,7 +4,8 @@ import { Select } from "@/components/select"
 import FileTree from "@/components/file-tree"
 import { For, Match, onCleanup, onMount, Show, Switch } from "solid-js"
 import { SelectDialog } from "@/components/select-dialog"
-import { useLocal, useSDK } from "@/context"
+import { LMStudioDialog } from "@/components/lmstudio-dialog"
+import { useLocal, useSDK, useLMStudio } from "@/context"
 import { Code } from "@/components/code"
 import {
   DragDropProvider,
@@ -25,6 +26,7 @@ import { getDirectory, getFilename } from "@/utils"
 export default function Page() {
   const sdk = useSDK()
   const local = useLocal()
+  const lmstudio = useLMStudio()
   const [store, setStore] = createStore({
     clickTimer: undefined as number | undefined,
     activeItem: undefined as string | undefined,
@@ -32,6 +34,7 @@ export default function Page() {
     dragging: undefined as "left" | "right" | undefined,
     modelSelectOpen: false,
     fileSelectOpen: false,
+    lmstudioOpen: false,
   })
 
   let inputRef: HTMLInputElement | undefined = undefined
@@ -191,51 +194,93 @@ export default function Page() {
 
   const handleSubmit = async (e: SubmitEvent) => {
     e.preventDefault()
-    const prompt = store.prompt
+    const prompt = store.prompt.trim()
+    if (!prompt) return
     setStore("prompt", "")
     inputRef?.blur()
 
-    const session =
-      (local.layout.rightPane() ? local.session.active() : undefined) ??
-      (await sdk.session.create().then((x) => x.data!))
-    local.session.setActive(session!.id)
-    local.layout.openRightPane()
+    const attachedFiles = local.file
+      .opened()
+      .filter((f) => f.selection || local.file.active()?.path === f.path)
+      .map((f) => ({
+        filename: f.name,
+        path: f.path,
+        content: f.content?.content ?? "",
+      }))
 
-    const response = await sdk.session.prompt({
-      path: { id: session!.id },
-      body: {
-        agent: local.agent.current()!.name,
-        model: { modelID: local.model.current()!.id, providerID: local.model.current()!.provider.id },
-        parts: [
-          {
-            type: "text",
-            text: prompt,
-          },
-          ...local.file
-            .opened()
-            .filter((f) => f.selection || local.file.active()?.path === f.path)
-            .flatMap((f) => [
-              {
-                type: "file" as const,
-                mime: "text/plain",
-                url: `file://${f.absolute}${f.selection ? `?start=${f.selection.startLine}&end=${f.selection.endLine}` : ""}`,
-                filename: f.name,
-                source: {
+    const onlineCount = lmstudio.onlineServers().length
+    const currentModel = local.model.current()
+    const useAutonomousLMStudio =
+      onlineCount > 0 &&
+      (lmstudio.store.autonomousMode ||
+        !currentModel ||
+        currentModel.provider.id.startsWith("lms-") ||
+        local.agent.current()?.name === "auto-cluster")
+
+    if (useAutonomousLMStudio) {
+      const existingSessionId = local.layout.rightPane() ? local.session.active()?.id : undefined
+      local.layout.openRightPane()
+      await lmstudio.executeAutonomousPrompt({
+        prompt,
+        sessionId: existingSessionId,
+        filesContext: attachedFiles,
+        onSessionCreated: (sid: string) => {
+          local.session.setActive(sid)
+        },
+      })
+      return
+    }
+
+    try {
+      const session =
+        (local.layout.rightPane() ? local.session.active() : undefined) ??
+        (await sdk.session.create().then((x) => x.data!))
+      if (!session) {
+        setStore("lmstudioOpen", true)
+        return
+      }
+      local.session.setActive(session.id)
+      local.layout.openRightPane()
+
+      const response = await sdk.session.prompt({
+        path: { id: session.id },
+        body: {
+          agent: local.agent.current()!.name,
+          model: { modelID: local.model.current()!.id, providerID: local.model.current()!.provider.id },
+          parts: [
+            {
+              type: "text",
+              text: prompt,
+            },
+            ...local.file
+              .opened()
+              .filter((f) => f.selection || local.file.active()?.path === f.path)
+              .flatMap((f) => [
+                {
                   type: "file" as const,
-                  text: {
-                    value: "@" + f.name,
-                    start: 0, // f.start,
-                    end: 0, // f.end,
+                  mime: "text/plain",
+                  url: `file://${f.absolute}${f.selection ? `?start=${f.selection.startLine}&end=${f.selection.endLine}` : ""}`,
+                  filename: f.name,
+                  source: {
+                    type: "file" as const,
+                    text: {
+                      value: "@" + f.name,
+                      start: 0,
+                      end: 0,
+                    },
+                    path: f.absolute,
                   },
-                  path: f.absolute,
                 },
-              },
-            ]),
-        ],
-      },
-    })
+              ]),
+          ],
+        },
+      })
 
-    console.log("response", response)
+      console.log("response", response)
+    } catch {
+      // OpenCode CLI daemon is not running; open LM Studio Direct IP connect modal
+      setStore("lmstudioOpen", true)
+    }
   }
 
   return (
@@ -307,20 +352,37 @@ export default function Page() {
               {(activeSession) => (
                 <div class="relative">
                   <div class="sticky top-0 bg-background z-50 px-2 h-8 border-b border-border-subtle/30">
-                    <div class="h-full flex items-center gap-2">
-                      <IconButton
-                        size="xs"
-                        variant="ghost"
-                        onClick={() => local.session.clearActive()}
-                        class="text-text-muted hover:text-text"
-                      >
-                        <Icon name="arrow-left" size={14} />
-                      </IconButton>
-                      <h2 class="text-sm font-medium text-text truncate">
-                        {activeSession().title || "Untitled Session"}
-                      </h2>
+                    <div class="h-full flex items-center justify-between gap-2">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <IconButton
+                          size="xs"
+                          variant="ghost"
+                          onClick={() => local.session.clearActive()}
+                          class="text-text-muted hover:text-text"
+                        >
+                          <Icon name="arrow-left" size={14} />
+                        </IconButton>
+                        <h2 class="text-sm font-medium text-text truncate">
+                          {activeSession().title || "Untitled Session"}
+                        </h2>
+                      </div>
                     </div>
                   </div>
+                  <Show
+                    when={(lmstudio.store.activeSteps[activeSession().id] ?? []).find((s) => s.status === "running")}
+                  >
+                    {(runningStep) => (
+                      <div class="sticky top-8 z-40 px-3 py-1.5 bg-background-panel/95 border-b border-accent/30 flex items-center justify-between gap-2 text-[11px]">
+                        <div class="flex items-center gap-2 min-w-0">
+                          <Icon name="loading" size={13} class="animate-spin text-accent shrink-0" />
+                          <span class="text-text truncate font-medium">{runningStep().title}</span>
+                        </div>
+                        <span class="text-[10px] font-mono text-accent uppercase shrink-0">
+                          {runningStep().role === "master" ? "👑 Master" : "⚡ Worker"}
+                        </span>
+                      </div>
+                    )}
+                  </Show>
                   <SessionTimeline session={activeSession().id} />
                 </div>
               )}
@@ -370,7 +432,39 @@ export default function Page() {
                   </For>
                 </SortableProvider>
               </Tabs.List>
-              <div class="shrink-0 h-full flex items-center gap-1 px-2 border-b border-border-subtle/40">
+              <div class="shrink-0 h-full flex items-center gap-1.5 px-2 border-b border-border-subtle/40">
+                <button
+                  type="button"
+                  onClick={() => setStore("lmstudioOpen", true)}
+                  classList={{
+                    "px-2.5 py-1 rounded-md text-xs flex items-center gap-1.5 border cursor-pointer transition-colors": true,
+                    "bg-success/10 border-success/40 text-text hover:bg-success/20":
+                      lmstudio.onlineServers().length >= 2,
+                    "bg-primary/10 border-primary/40 text-text hover:bg-primary/20":
+                      lmstudio.onlineServers().length === 1,
+                    "bg-background-panel border-border-subtle/60 text-text-muted hover:text-text":
+                      lmstudio.onlineServers().length === 0,
+                  }}
+                >
+                  <span
+                    classList={{
+                      "size-2 rounded-full": true,
+                      "bg-success": lmstudio.onlineServers().length > 0,
+                      "bg-text-muted/50": lmstudio.onlineServers().length === 0,
+                    }}
+                  />
+                  <Icon name="cpu" size={13} class="text-primary" />
+                  <span class="font-medium">
+                    {lmstudio.onlineServers().length > 0
+                      ? `LM Studio (${lmstudio.onlineServers().length} IP${lmstudio.onlineServers().length > 1 ? "s" : ""})`
+                      : "Add LM Studio IP"}
+                  </span>
+                  <Show when={lmstudio.topology().worker}>
+                    <span class="px-1.5 py-0.2 rounded bg-accent/20 text-accent text-[10px] font-mono uppercase">
+                      Master⇄Agent
+                    </span>
+                  </Show>
+                </button>
                 <Show when={local.file.active() && local.file.active()!.content?.diff}>
                   {(() => {
                     const f = local.file.active()!
@@ -484,12 +578,54 @@ export default function Page() {
         >
           <div
             class="w-full max-w-xl min-w-0 p-2 mx-auto rounded-lg isolate backdrop-blur-xs
-                   flex flex-col gap-1
+                   flex flex-col gap-1.5
                    bg-gradient-to-b from-background-panel/90 to-background/90
                    ring-1 ring-border-active/50 border border-transparent
                    shadow-[0_0_33px_rgba(0,0,0,0.8)]
                    focus-within:ring-2 focus-within:ring-primary/40 focus-within:border-primary"
           >
+            {/* Autonomous LM Studio Cluster Bar inside Prompt */}
+            <div class="flex items-center justify-between gap-2 px-1.5 py-1 rounded bg-background/60 border border-border-subtle/40 text-[11px]">
+              <Show
+                when={lmstudio.topology().master}
+                fallback={
+                  <button
+                    type="button"
+                    onClick={() => setStore("lmstudioOpen", true)}
+                    class="flex items-center gap-1.5 text-text-muted hover:text-text cursor-pointer"
+                  >
+                    <Icon name="globe" size={12} class="text-primary" />
+                    <span>No LM Studio IP connected — click to add server IP (e.g. 192.168.x.x)</span>
+                  </button>
+                }
+              >
+                {(master) => (
+                  <div class="flex items-center gap-2 min-w-0 overflow-hidden">
+                    <span class="px-1.5 py-0.5 rounded bg-accent/15 text-accent font-mono text-[10px] shrink-0">
+                      👑 MASTER: {master().model.id} ({master().server.ip})
+                    </span>
+                    <Show when={lmstudio.topology().worker}>
+                      {(worker) => (
+                        <>
+                          <span class="text-text-muted">⇄</span>
+                          <span class="px-1.5 py-0.5 rounded bg-primary/15 text-primary font-mono text-[10px] truncate">
+                            ⚡ AGENT: {worker().model.id} ({worker().server.ip})
+                          </span>
+                        </>
+                      )}
+                    </Show>
+                  </div>
+                )}
+              </Show>
+              <button
+                type="button"
+                onClick={() => setStore("lmstudioOpen", true)}
+                class="text-[10px] font-mono text-primary hover:underline shrink-0 cursor-pointer"
+              >
+                Manage IPs
+              </button>
+            </div>
+
             <div class="flex flex-wrap gap-1">
               <Show when={local.file.active()}>
                 <FileTag
@@ -507,11 +643,15 @@ export default function Page() {
               type="text"
               value={store.prompt}
               onInput={(e) => setStore("prompt", e.currentTarget.value)}
-              placeholder="Placeholder text..."
+              placeholder={
+                lmstudio.topology().worker
+                  ? "Ask anything — Master plans & delegates subtasks to Worker Agent automatically..."
+                  : "Ask anything or connect LM Studio IPs..."
+              }
               class="w-full p-1 pb-4 text-text font-light placeholder-text-muted/70 text-sm focus:outline-none"
             />
             <div class="flex justify-between items-center text-xs text-text-muted">
-              <div class="flex gap-2 items-center">
+              <div class="flex gap-2 items-center min-w-0">
                 <Select
                   options={local.agent.list().map((a) => a.name)}
                   current={local.agent.current().name}
@@ -519,16 +659,31 @@ export default function Page() {
                   class="uppercase"
                 />
                 <Button onClick={() => setStore("modelSelectOpen", true)}>
-                  {local.model.current()?.name ?? "Select model"}
+                  {local.model.current()?.name ?? lmstudio.topology().master?.model.name ?? "Select model"}
                   <Icon name="chevron-down" size={24} class="text-text-muted" />
                 </Button>
-                <span class="text-text-muted/70 whitespace-nowrap">{local.model.current()?.provider.name}</span>
+                <span class="text-text-muted/70 whitespace-nowrap truncate">
+                  {local.model.current()?.provider.name ?? lmstudio.topology().master?.server.name ?? ""}
+                </span>
               </div>
-              <div class="flex gap-1 items-center">
-                <IconButton class="text-text-muted" size="xs" variant="ghost">
-                  <Icon name="photo" size={16} />
-                </IconButton>
-                <IconButton class="text-background-panel! bg-primary rounded-full!" size="xs" variant="ghost">
+              <div class="flex gap-1 items-center shrink-0">
+                <Tooltip value="Configure LM Studio Server IPs" placement="top">
+                  <IconButton
+                    type="button"
+                    class="text-text-muted hover:text-primary"
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => setStore("lmstudioOpen", true)}
+                  >
+                    <Icon name="cpu" size={16} />
+                  </IconButton>
+                </Tooltip>
+                <IconButton
+                  type="submit"
+                  class="text-background-panel! bg-primary rounded-full! cursor-pointer"
+                  size="xs"
+                  variant="ghost"
+                >
                   <Icon name="arrow-up" size={14} />
                 </IconButton>
               </div>
@@ -536,6 +691,7 @@ export default function Page() {
           </div>
         </form>
       </div>
+      <LMStudioDialog open={store.lmstudioOpen} onClose={() => setStore("lmstudioOpen", false)} />
       <Show when={store.modelSelectOpen}>
         <SelectDialog
           key={(x) => `${x.provider.id}:${x.id}`}

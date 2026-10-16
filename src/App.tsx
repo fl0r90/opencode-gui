@@ -12,6 +12,7 @@ import {
   ThemeProvider,
   ShikiProvider,
   MarkedProvider,
+  LMStudioProvider,
 } from "@/context"
 
 const App: Component = () => (
@@ -22,11 +23,13 @@ const App: Component = () => (
           <SDKProvider>
             <EventProvider>
               <SyncProvider>
-                <LocalProvider>
-                  <Router root={Layout}>
-                    <Route path="/" component={Home} />
-                  </Router>
-                </LocalProvider>
+                <LMStudioProvider>
+                  <LocalProvider>
+                    <Router root={Layout}>
+                      <Route path="/" component={Home} />
+                    </Router>
+                  </LocalProvider>
+                </LMStudioProvider>
               </SyncProvider>
             </EventProvider>
           </SDKProvider>
